@@ -172,6 +172,10 @@
   .setup h2 { font-size: 22px; margin: 0 0 6px; }
   .qitem { padding: 10px 0; border-bottom: 1px solid var(--line); }
 
+  .stbox { display: block; width: 100%; background: var(--box2); border-radius: 14px; padding: 11px 12px; margin-top: 8px; }
+  .tag { display: inline-block; font-size: 11px; padding: 3px 8px; border-radius: 999px; }
+  .proj .rowf { padding: 5px 0; font-size: 13px; }
+
   /* ---------- motion and gestures ---------- */
   .bar div, .stack div { transition: width .65s cubic-bezier(.2, .8, .2, 1); }
   #app { transition: transform .22s cubic-bezier(.2, .8, .2, 1), opacity .22s ease; }
@@ -357,11 +361,77 @@ function debitBalance(a, untilDay, strictBefore) {
     + sum(D.movs, function (x) { return ok(x) && x.destino === a.name; })
     - sum(D.movs, function (x) { return ok(x) && x.cuenta === a.name && x.tipo !== 'Ingreso'; });
 }
-function cardDebt(a) {
+function cardDebt(a, day) {
+  day = day || D.today;
   return a.ini
-    + sum(D.movs, function (x) { return x.day <= D.today && x.cuenta === a.name && x.tipo === 'Compra TC'; })
-    - sum(D.movs, function (x) { return x.day <= D.today && x.destino === a.name && x.tipo === 'Pago TC'; })
-    - sum(D.movs, function (x) { return x.day <= D.today && x.cuenta === a.name && x.tipo === 'Reembolso TC'; });
+    + sum(D.movs, function (x) { return x.day <= day && x.cuenta === a.name && x.tipo === 'Compra TC'; })
+    - sum(D.movs, function (x) { return x.day <= day && x.destino === a.name && x.tipo === 'Pago TC'; })
+    - sum(D.movs, function (x) { return x.day <= day && x.cuenta === a.name && x.tipo === 'Reembolso TC'; });
+}
+
+// ---------- Selected month: past (as of its last day), current (today) or future (projection) ----------
+function period() {
+  var ym = key(S.y, S.m), cur = D.today.slice(0, 7), end = ym + '-' + pad(daysInMonth(S.y, S.m));
+  var kind = ym < cur ? 'past' : ym === cur ? 'current' : 'future';
+  return { kind: kind, asOf: kind === 'past' ? end : D.today, end: end };
+}
+function dayLabel(day) { return Number(day.slice(8, 10)) + ' ' + monthName(Number(day.slice(5, 7))).slice(0, 3).toLowerCase(); }
+function dateOf(y, m, d) { return key(y, m) + '-' + pad(Math.min(d, daysInMonth(y, m))); }
+function daysBetween(a, b) { return Math.round((Date.UTC(+b.slice(0, 4), +b.slice(5, 7) - 1, +b.slice(8, 10)) - Date.UTC(+a.slice(0, 4), +a.slice(5, 7) - 1, +a.slice(8, 10))) / 86400000); }
+function nextDay(day) { var d = new Date(Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10) + 1)); return d.toISOString().slice(0, 10); }
+
+// Statement that closes in month (y, m): purchases after the previous cutoff up to this cutoff.
+// Payments are matched with the oldest purchases first, so "remaining" is what's still unpaid.
+function statement(card, y, m) {
+  if (!card.corte || !card.pago) return null;
+  return memo('st' + card.name + y + '-' + m, function () {
+    var end = dateOf(y, m, card.corte), p = shift(y, m, -1), prevEnd = dateOf(p.y, p.m, card.corte);
+    var dm = card.pago > card.corte ? { y: y, m: m } : shift(y, m, 1);
+    var due = dateOf(dm.y, dm.m, card.pago);
+    var inCycle = function (x) { return x.day > prevEnd && x.day <= end; };
+    var amount = Math.max(0, sum(D.movs, function (x) { return x.cuenta === card.name && x.tipo === 'Compra TC' && inCycle(x); })
+      - sum(D.movs, function (x) { return x.cuenta === card.name && x.tipo === 'Reembolso TC' && inCycle(x); }));
+    var remaining = Math.min(amount, ((D.pending || {})[card.name] || []).reduce(function (t, q) { return t + (q.day && inCycle(q) ? q.monto : 0); }, 0));
+    var closed = D.today > end, status;
+    if (!amount) status = 'none';
+    else if (remaining < 1) status = 'paid';
+    else if (D.today > due) status = 'overdue';
+    else if (remaining < amount) status = 'partial';
+    else status = 'due';
+    return { card: card, start: nextDay(prevEnd), end: end, due: due, amount: amount, remaining: remaining, closed: closed, status: status };
+  });
+}
+// Card payments still unpaid with a due date up to "until" (also overdue ones)
+function duesUntil(until) {
+  var out = [], ty = +D.today.slice(0, 4), tm = +D.today.slice(5, 7);
+  accts('Crédito').forEach(function (card) {
+    if (!card.corte || !card.pago) return;
+    for (var k = -6; k <= 13; k++) {
+      var c = shift(ty, tm, k), st = statement(card, c.y, c.m);
+      if (st.due > until) break;
+      if (st.remaining >= 1) out.push(st);
+    }
+  });
+  return out.sort(function (a, b) { return a.due < b.due ? -1 : 1; });
+}
+function statusTag(st) {
+  var tag = function (bg, color, text) { return '<span class="tag" style="background:' + bg + ';color:' + color + '">' + text + '</span>'; };
+  if (!st.closed && st.amount) return st.status === 'paid' ? tag('rgba(126,226,168,.15)', 'var(--green)', 'Pagado · corta el ' + dayLabel(st.end))
+    : tag('var(--line2)', '#A1A1AA', 'Abierto · corta el ' + dayLabel(st.end) + ' · puede crecer');
+  if (st.status === 'none') return tag('var(--line2)', '#A1A1AA', st.closed ? 'Sin compras' : 'Abierto · corta el ' + dayLabel(st.end));
+  if (st.status === 'paid') return tag('rgba(126,226,168,.15)', 'var(--green)', 'Pagado');
+  if (st.status === 'overdue') return tag('rgba(248,113,113,.15)', 'var(--alert)', 'Vencido · faltan ' + money(st.remaining));
+  var left = daysBetween(D.today, st.due);
+  var when = left === 0 ? 'vence hoy' : left === 1 ? 'vence mañana' : 'faltan ' + left + ' días';
+  if (st.status === 'partial') return tag('rgba(244,199,123,.15)', 'var(--amber)', 'Pagado en parte · faltan ' + money(st.remaining) + ' · ' + when);
+  return tag('rgba(244,199,123,.15)', 'var(--amber)', 'Por pagar · ' + when);
+}
+function statementBox(card, y, m) {
+  var st = statement(card, y, m);
+  if (!st) return '<div class="stbox"><div class="rowf"><span class="tt">' + esc(card.name) + '</span></div>' +
+    '<button class="tiny tap" style="color:var(--link);margin-top:4px" data-act="editAcc" data-arg="' + esc(card.name) + '">Configura el corte y el pago</button></div>';
+  return '<button class="stbox tap" data-act="tarjeta" data-arg="' + esc(card.name) + '"><div class="rowf"><span class="tt">' + esc(card.name) + '</span><span style="font-weight:500">' + money(st.amount) + '</span></div>' +
+    '<div class="tiny muted" style="margin:3px 0 6px">Ciclo ' + dayLabel(st.start) + ' – ' + dayLabel(st.end) + ' · paga hasta el ' + dayLabel(st.due) + '</div>' + statusTag(st) + '</button>';
 }
 function balanceNow(a) { return a.type === 'Crédito' ? cardDebt(a) : debitBalance(a, D.today); }
 function usage(debt, cupo) {
@@ -528,17 +598,8 @@ function pageInicio() {
         return '<span><span style="color:' + st.color + '">' + icon(st.icon, 14) + '</span>' + esc(g.name) + ' ' + Math.round(g.value / total * 100) + '%</span>';
       }).join('') + '</div>' : '<div class="empty">Sin gastos este mes.</div>') + '</div>';
 
-  // Cards and balances
-  var cards = accts('Crédito').filter(function (a) { return a.cupo > 0; });
-  var ringsHtml = cards.length ? '<div class="rings" style="margin-bottom:12px">' + cards.map(function (a) {
-    var u = usage(cardDebt(a), a.cupo);
-    return '<button class="ring tap" data-act="go" data-arg="cuentas">' + ringSvg(u.pct, u.color, 84) + '<div>' + esc(a.name.replace(/^TC\s+/i, '')) + '</div></button>';
-  }).join('') + '</div>' : '';
-  var disp = accts('Débito').reduce(function (t, a) { return t + debitBalance(a, D.today); }, 0);
-  var deuda = accts('Crédito').reduce(function (t, a) { return t + cardDebt(a); }, 0);
-  var money2 = '<div class="sec"><div class="cap">Cupo de tarjetas</div>' + ringsHtml +
-    '<button class="item tap" data-act="go" data-arg="cuentas"><span class="nm">' + '<span class="ic sm" style="background:var(--box2);color:#A1A1AA">' + icon('bank') + '</span><span class="tt">Disponible</span></span><span class="am">' + money(disp) + '</span></button>' +
-    '<button class="item tap" data-act="go" data-arg="cuentas"><span class="nm">' + '<span class="ic sm" style="background:var(--box2);color:#A1A1AA">' + icon('card') + '</span><span class="tt">Deuda tarjetas</span></span><span class="am">' + money(deuda) + '</span></button></div>';
+  // Cards and balances follow the selected month
+  var money2 = moneySection(true);
 
   var recent = D.movs.slice().sort(byNewest).slice(0, 5);
   var recentHtml = '<div class="sec"><div class="cap">Recientes<button data-act="go" data-arg="movs">Ver todos</button></div>' +
@@ -624,17 +685,59 @@ function pageGastos() {
 }
 
 // ---------- Cuentas y tarjetas ----------
+// Balances, card limits, this month's statements and (for future months) the projection.
+function moneySection(onInicio) {
+  var per = period(), cards = accts('Crédito');
+  var at = per.kind === 'past' ? per.asOf : D.today;
+  var disp = accts('Débito').reduce(function (t, a) { return t + debitBalance(a, at); }, 0);
+  var deuda = cards.reduce(function (t, a) { return t + cardDebt(a, at); }, 0);
+  var when = per.kind === 'past' ? 'al ' + dayLabel(per.asOf) : 'hoy';
+  var html = '';
+  if (onInicio) {
+    var withCupo = cards.filter(function (a) { return a.cupo > 0; });
+    if (withCupo.length) html += '<div class="cap">Cupo usado ' + when + '</div><div class="rings" style="margin-bottom:12px">' + withCupo.map(function (a) {
+      var u = usage(cardDebt(a, at), a.cupo);
+      return '<button class="ring tap" data-act="go" data-arg="cuentas">' + ringSvg(u.pct, u.color, 84) + '<div>' + esc(a.name.replace(/^TC\s+/i, '')) + '</div></button>';
+    }).join('') + '</div>';
+  }
+  var row = function (ic, label, value, extra) {
+    return '<button class="item tap" data-act="go" data-arg="cuentas"><span class="nm"><span class="ic sm" style="background:var(--box2);color:#A1A1AA">' + icon(ic) + '</span>' +
+      '<span class="tt">' + label + '</span></span><span class="am"' + (extra || '') + '>' + money(value) + '</span></button>';
+  };
+  if (per.kind === 'future') {
+    var dues = duesUntil(per.end), total = dues.reduce(function (t, s) { return t + s.remaining; }, 0);
+    html += '<div class="cap">Disponible proyectado al ' + dayLabel(per.end) + '</div>' +
+      '<div class="mid" data-count="' + (disp - total) + '">' + money(disp - total) + '</div>' +
+      '<div class="tiny muted" style="margin-bottom:6px">Si pagas tus tarjetas a tiempo</div>' +
+      '<div class="box proj"><div class="rowf"><span class="muted">Disponible hoy</span><span>' + money(disp) + '</span></div>' +
+      (dues.length ? dues.map(function (s) {
+        return '<div class="rowf"><span class="muted">− ' + esc(s.card.name.replace(/^TC\s+/i, '')) + ' · ' + dayLabel(s.due) + (s.closed ? '' : ' (abierto)') + '</span><span class="neg">−' + money(s.remaining) + '</span></div>';
+      }).join('') : '<div class="rowf"><span class="muted">Sin pagos de tarjeta pendientes</span><span>$0</span></div>') + '</div>' +
+      row('card', 'Deuda tarjetas hoy', deuda);
+  } else {
+    html += row('bank', 'Disponible ' + when, disp) + row('card', 'Deuda tarjetas ' + when, deuda);
+    if (per.kind === 'current') {
+      var dm = duesUntil(per.end), dt = dm.reduce(function (t, s) { return t + s.remaining; }, 0);
+      if (dt) html += '<div class="tiny muted" style="padding:6px 0 0">Después de pagar lo que vence este mes: <span style="color:var(--text)">' + money(disp - dt) + '</span></div>';
+    }
+  }
+  if (cards.length && onInicio) html += '<div class="cap" style="margin-top:14px">Tarjetas · extracto de ' + monthName().toLowerCase() + '</div>' +
+    cards.map(function (c) { return statementBox(c, S.y, S.m); }).join('');
+  return '<div class="sec">' + html + '</div>';
+}
+
 function pageCuentas() {
   var deb = accts('Débito'), cred = accts('Crédito');
-  var disp = deb.reduce(function (t, a) { return t + debitBalance(a, D.today); }, 0);
-  var deuda = cred.reduce(function (t, a) { return t + cardDebt(a); }, 0);
-  var left = '<div class="sec"><div class="cap">Disponible hoy<button data-act="manage">Administrar</button></div><div class="mid" style="margin-bottom:6px" data-count="' + disp + '">' + money(disp) + '</div>' +
+  var per = period(), at = per.kind === 'past' ? per.asOf : D.today, when = per.kind === 'past' ? 'al ' + dayLabel(per.asOf) : 'hoy';
+  var disp = deb.reduce(function (t, a) { return t + debitBalance(a, at); }, 0);
+  var deuda = cred.reduce(function (t, a) { return t + cardDebt(a, at); }, 0);
+  var left = '<div class="sec"><div class="cap">Disponible ' + when + '<button data-act="manage">Administrar</button></div><div class="mid" style="margin-bottom:6px" data-count="' + disp + '">' + money(disp) + '</div>' +
     deb.map(function (a) {
-      return '<button class="item tap" data-act="cuenta" data-arg="' + esc(a.name) + '"><span class="nm">' + accBox(a.name) + '<span class="tt">' + esc(a.name) + '</span></span><span class="am">' + fmt(debitBalance(a, D.today)) + '</span></button>';
-    }).join('') + '</div>';
-  var right = '<div class="sec"><div class="cap">Deuda tarjetas hoy</div><div class="mid" style="margin-bottom:6px" data-count="' + deuda + '">' + money(deuda) + '</div>' +
+      return '<button class="item tap" data-act="cuenta" data-arg="' + esc(a.name) + '"><span class="nm">' + accBox(a.name) + '<span class="tt">' + esc(a.name) + '</span></span><span class="am">' + fmt(debitBalance(a, at)) + '</span></button>';
+    }).join('') + '</div>' + (per.kind === 'future' ? moneySection(false) : '');
+  var right = '<div class="sec"><div class="cap">Deuda tarjetas ' + when + '</div><div class="mid" style="margin-bottom:6px" data-count="' + deuda + '">' + money(deuda) + '</div>' +
     cred.map(function (a) {
-      var d = cardDebt(a), u = usage(d, a.cupo), pend = (D.pending && D.pending[a.name]) || [];
+      var d = cardDebt(a, at), u = usage(d, a.cupo), pend = (D.pending && D.pending[a.name]) || [];
       var pendTotal = pend.reduce(function (t, p) { return t + p.monto; }, 0), open = OPEN_CARD[a.name];
       var html = '<div style="padding:11px 0;border-bottom:1px solid var(--line)">' +
         '<button class="rowf tap" style="width:100%" data-act="tarjeta" data-arg="' + esc(a.name) + '"><span class="nm" style="display:flex;align-items:center">' + accBox(a.name) + '<span class="tt">' + esc(a.name) + '</span></span><span style="font-weight:500">' + money(d) + '</span></button>';
@@ -642,6 +745,7 @@ function pageCuentas() {
         html += '<div class="bar" style="margin:8px 0 4px 46px"><div style="width:' + Math.min(100, Math.max(2, u.pct * 100)) + '%;background:' + u.color + '"></div></div>' +
           '<div class="rowf tiny muted" style="margin-left:46px"><span style="color:' + u.color + '">' + Math.round(u.pct * 100) + '% de ' + money(a.cupo) + '</span><span>Disponible ' + short(a.cupo - d) + '</span></div>';
       }
+      html += '<div style="margin-left:46px">' + statementBox(a, S.y, S.m) + '</div>';
       if (pend.length) {
         var groups = {}, list = open ? (EXPAND_CARD[a.name] ? pend : pend.slice(0, 3)) : [];
         pend.forEach(function (p) { groups[p.cat] = (groups[p.cat] || 0) + p.monto; });
@@ -868,18 +972,19 @@ var APPLY = {
   catDelete: function (name) { return function (srv) { srv.categories = srv.categories.filter(function (c) { return c.name !== name; }); rebuildLists(srv); }; },
   catRestore: function (c) { return function (srv) { srv.categories.push(JSON.parse(JSON.stringify(c))); rebuildLists(srv); }; },
   accArchive: function (name, on) { return function (srv) { srv.accounts.forEach(function (a) { if (a.name === name) a.archived = on; }); rebuildLists(srv); }; },
-  accUpdate: function (old, nn, ini, cupo) { return function (srv) {
+  accUpdate: function (old, nn, ini, cupo, corte, pago) { return function (srv) {
     var a = srv.accounts.filter(function (x) { return x.name === old; })[0];
     if (!a) throw new Error('No encontré la cuenta.');
     if (nn !== old && nameTaken(srv.accounts, nn, a)) throw new Error('Ya existe una cuenta llamada "' + nn + '".');
     a.ini = ini; if (cupo != null && a.type === 'Crédito') a.cupo = cupo;
+    if (corte != null && a.type === 'Crédito') { a.corte = corte; a.pago = pago; }
     if (nn !== old) { a.name = nn; srv.movs.forEach(function (m) { if (m.cuenta === old) m.cuenta = nn; if (m.destino === old) m.destino = nn; }); }
     rebuildLists(srv);
   }; },
-  accAdd: function (name, type, ini, cupo) { return function (srv) {
+  accAdd: function (name, type, ini, cupo, corte, pago) { return function (srv) {
     if (nameTaken(srv.accounts, name)) throw new Error('Ya existe una cuenta llamada "' + name + '".');
     if (srv.accounts.filter(function (a) { return a.type === type && !a.archived; }).length >= 10) throw new Error('Ya tienes 10 cuentas activas de este tipo.');
-    srv.accounts.push({ name: name, type: type, ini: ini, archived: false, cupo: type === 'Crédito' ? cupo : 0 });
+    srv.accounts.push({ name: name, type: type, ini: ini, archived: false, cupo: type === 'Crédito' ? cupo : 0, corte: corte || 0, pago: pago || 0 });
     rebuildLists(srv);
   }; },
   accDelete: function (name) { return function (srv) { srv.accounts = srv.accounts.filter(function (a) { return a.name !== name; }); rebuildLists(srv); }; }
@@ -1101,7 +1206,10 @@ function showEditAccount(name, keepValues) {
     '<div class="field"><label>¿Qué quieres corregir?</label><div class="seg" style="margin:0"><button data-act="accMode" data-arg="ini" class="' + (ACC_MODE === 'ini' ? 'on' : '') + '">' + word + ' inicial</button>' +
     '<button data-act="accMode" data-arg="now" class="' + (ACC_MODE === 'now' ? 'on' : '') + '">' + word + ' actual</button></div></div>' +
     '<div class="field"><label>' + word + (ACC_MODE === 'ini' ? ' inicial' : ' actual (hoy)') + '</label><input id="eaVal" inputmode="numeric" value="' + Math.round(ACC_MODE === 'ini' ? a.ini : now) + '"></div>' +
-    (cred ? '<div class="field"><label>Cupo de la tarjeta</label><input id="eaCupo" inputmode="numeric" value="' + esc(prevCupo) + '"></div>' : '') +
+    (cred ? '<div class="field"><label>Cupo de la tarjeta</label><input id="eaCupo" inputmode="numeric" value="' + esc(prevCupo) + '"></div>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>Día de corte</label><input id="eaCorte" inputmode="numeric" maxlength="2" placeholder="15" value="' + (keepValues && document.getElementById('eaCorte') ? esc(document.getElementById('eaCorte').value) : (a.corte || '')) + '"></div>' +
+      '<div class="field"><label>Día límite de pago</label><input id="eaPago" inputmode="numeric" maxlength="2" placeholder="5" value="' + (keepValues && document.getElementById('eaPago') ? esc(document.getElementById('eaPago').value) : (a.pago || '')) + '"></div></div>' +
+      '<div class="tiny muted" style="margin-top:-4px">Si el día de pago es menor que el de corte, el pago vence el mes siguiente al corte.</div>' : '') +
     '<div class="info">' + word + ' inicial: ' + fmt(a.ini) + '<br>' + word + ' hoy: ' + fmt(now) + '</div>' +
     '<div class="errmsg" id="accErr"></div><button class="btn" id="accSaveEdit" data-act="saveAcc">Guardar cambios</button>' +
     (Math.round(now) === 0 ? '<button class="btn2 danger" id="accArchive" data-act="archive">Archivar cuenta</button>'
@@ -1116,7 +1224,9 @@ function saveEditAccount() {
   var newIni = ACC_MODE === 'ini' ? val : val - (balanceNow(a) - a.ini);
   var cupoEl = document.getElementById('eaCupo');
   var cupo = a.type === 'Crédito' && cupoEl ? (Number(String(cupoEl.value).replace(/[^0-9]/g, '')) || 0) : null;
-  instant('updateAccount', [a.name, name, newIni, cupo], APPLY.accUpdate(a.name, name, newIni, cupo), { ok: 'Cuenta actualizada', err: 'accErr' });
+  var days = readCycleDays('eaCorte', 'eaPago', 'accErr');
+  if (days === false) return;
+  instant('updateAccount', [a.name, name, newIni, cupo, days.corte, days.pago], APPLY.accUpdate(a.name, name, newIni, cupo, days.corte, days.pago), { ok: 'Cuenta actualizada', err: 'accErr' });
 }
 function showAddAccount(keepValues) {
   var g = function (id) { var el = document.getElementById(id); return keepValues && el ? el.value : ''; };
@@ -1126,7 +1236,9 @@ function showAddAccount(keepValues) {
     '<button data-act="newType" data-arg="Crédito" class="' + (cred ? 'on' : '') + '">Crédito</button></div></div>' +
     '<div class="field"><label>Nombre</label><input id="accName" maxlength="40" placeholder="' + (cred ? 'Ej. TC Bancolombia Visa' : 'Ej. Ahorros Bancolombia') + '" value="' + esc(name) + '"></div>' +
     '<div class="field"><label>' + (cred ? 'Deuda actual de la tarjeta' : 'Saldo actual de la cuenta') + '</label><input id="accIni" inputmode="numeric" placeholder="0" value="' + esc(ini) + '"></div>' +
-    (cred ? '<div class="field"><label>Cupo de la tarjeta</label><input id="accCupo" inputmode="numeric" placeholder="Ej. 5000000" value="' + esc(cupo) + '"></div>' : '') +
+    (cred ? '<div class="field"><label>Cupo de la tarjeta</label><input id="accCupo" inputmode="numeric" placeholder="Ej. 5000000" value="' + esc(cupo) + '"></div>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>Día de corte</label><input id="accCorte" inputmode="numeric" maxlength="2" placeholder="15" value="' + esc(g('accCorte')) + '"></div>' +
+      '<div class="field"><label>Día límite de pago</label><input id="accPago" inputmode="numeric" maxlength="2" placeholder="5" value="' + esc(g('accPago')) + '"></div></div>' : '') +
     '<div class="errmsg" id="accErr"></div><button class="btn" id="accSave" data-act="saveNewAcc">Guardar cuenta</button>';
   openSheet('Agregar cuenta', null, null, body);
 }
@@ -1135,7 +1247,22 @@ function saveNewAccount() {
   var name = document.getElementById('accName').value.trim();
   if (!name) { document.getElementById('accErr').textContent = 'Escribe el nombre de la cuenta.'; return; }
   var ini = num('accIni'), cupo = NEW_TYPE === 'Crédito' ? num('accCupo') : 0;
-  instant('addAccount', [name, NEW_TYPE, ini, cupo], APPLY.accAdd(name, NEW_TYPE, ini, cupo), { ok: 'Cuenta agregada', err: 'accErr' });
+  var days = NEW_TYPE === 'Crédito' ? readCycleDays('accCorte', 'accPago', 'accErr') : { corte: 0, pago: 0 };
+  if (days === false) return;
+  instant('addAccount', [name, NEW_TYPE, ini, cupo, days.corte, days.pago], APPLY.accAdd(name, NEW_TYPE, ini, cupo, days.corte, days.pago), { ok: 'Cuenta agregada', err: 'accErr' });
+}
+// Both empty = not configured; otherwise both must be days 1-31.
+function readCycleDays(idC, idP, errId) {
+  var c = document.getElementById(idC), p = document.getElementById(idP);
+  if (!c || !p) return { corte: null, pago: null };
+  var cv = String(c.value).trim(), pv = String(p.value).trim();
+  if (!cv && !pv) return { corte: 0, pago: 0 };
+  var cn = Number(cv), pn = Number(pv);
+  if (!(cn >= 1 && cn <= 31 && pn >= 1 && pn <= 31) || cn % 1 || pn % 1) {
+    document.getElementById(errId).textContent = 'Escribe el día de corte y el de pago (de 1 a 31).';
+    return false;
+  }
+  return { corte: cn, pago: pn };
 }
 
 // ===================== Month picker and page menu =====================

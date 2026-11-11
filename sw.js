@@ -1,6 +1,6 @@
 // Lets the app open instantly, even without internet. Your data is not here: the app keeps it on the phone.
 // Change VERSION when you upload new files.
-const VERSION = 'mis-finanzas-v14';
+const VERSION = 'mis-finanzas-v15';
 const FILES = ['./', 'index.html', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
