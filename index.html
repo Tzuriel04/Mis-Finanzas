@@ -120,14 +120,15 @@
   .sk { background: linear-gradient(90deg, var(--box) 0%, var(--box2) 50%, var(--box) 100%); background-size: 200% 100%; animation: sk 1.2s infinite; border-radius: 14px; margin-bottom: 12px; }
   @keyframes sk { from { background-position: 200% 0; } to { background-position: -200% 0; } }
   .err { text-align: center; color: var(--muted); padding: 40px 16px; }
-  .tap:active { opacity: .6; }
+  .tap { transition: transform .12s ease, opacity .12s ease; }
+  .tap:active { transform: scale(.97); opacity: .85; }
 
   /* ---------- bottom sheet ---------- */
   .dim { position: fixed; inset: 0; background: rgba(0,0,0,.6); opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 20; }
   .dim.on { opacity: 1; pointer-events: auto; }
   .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 21; max-width: 640px; margin: 0 auto; background: var(--box2);
     border-radius: 22px 22px 0 0; max-height: 88vh; display: flex; flex-direction: column; transform: translateY(100%);
-    transition: transform .25s ease; padding-bottom: env(safe-area-inset-bottom); }
+    transition: transform .42s cubic-bezier(.2, 1.12, .3, 1); padding-bottom: env(safe-area-inset-bottom); }
   .sheet.on { transform: translateY(0); }
   .dim:not(.show), .sheet:not(.show) { display: none; }
   .sh-head { padding: 10px 20px 4px; }
@@ -171,6 +172,20 @@
   .setup h2 { font-size: 22px; margin: 0 0 6px; }
   .qitem { padding: 10px 0; border-bottom: 1px solid var(--line); }
 
+  /* ---------- motion and gestures ---------- */
+  .bar div, .stack div { transition: width .65s cubic-bezier(.2, .8, .2, 1); }
+  #app { transition: transform .22s cubic-bezier(.2, .8, .2, 1), opacity .22s ease; }
+  .ptr { height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  .ptr.spin .svg { animation: spin .8s linear infinite; }
+  .swrow { position: relative; overflow: hidden; border-bottom: 1px solid var(--line); }
+  .swrow:last-child { border-bottom: 0; }
+  .swact { position: absolute; top: 0; right: 0; bottom: 0; width: 150px; display: flex; }
+  .swact button { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; text-align: center; }
+  .swrow > .item { position: relative; background: var(--bg); border-bottom: 0; transition: transform .3s cubic-bezier(.2, .9, .3, 1.1); }
+  .sheet .swrow > .item { background: var(--box2); }
+  .sheet .swrow, .sheet .swrow:last-child { border-bottom: 1px solid var(--line2); }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
+
   /* ---------- toast ---------- */
   .toast { position: fixed; left: 16px; right: 16px; bottom: calc(env(safe-area-inset-bottom) + 90px); z-index: 30; max-width: 480px; margin: 0 auto;
     background: var(--line2); border-radius: 14px; padding: 13px 16px; display: none; justify-content: space-between; align-items: center; gap: 12px;
@@ -199,6 +214,7 @@
 <div class="menu" id="menu"></div>
 
 <div class="scroller" id="scroller">
+  <div class="ptr" id="ptr"><span data-ic="refresh"></span><span id="ptrTx">Jala para actualizar</span></div>
   <div class="wrap" id="app">
     <div class="sk" style="height:150px"></div><div class="sk" style="height:90px"></div><div class="sk" style="height:260px"></div>
   </div>
@@ -360,14 +376,19 @@ function cardPurchases(ym) {
   }, 0);
 }
 // Month totals. Expenses = what was paid (debit expenses + card payments by category).
-function monthTotals(y, m) {
+// Results are kept until the data changes, so moving around the app doesn't recalculate everything.
+var MEMO = {};
+function memo(k, f) { return Object.prototype.hasOwnProperty.call(MEMO, k) ? MEMO[k] : (MEMO[k] = f()); }
+function monthTotals(y, m) { return memo('mt' + y + '-' + m, function () { return monthTotalsRaw(y, m); }); }
+function monthTotalsRaw(y, m) {
   var f = inMonth(key(y, m));
   var ing = sum(D.movs, function (x) { return f(x) && x.tipo === 'Ingreso'; });
   var gas = D.paid.reduce(function (t, p) { return t + (f(p) ? p.monto : 0); }, 0);
   return { ing: ing, gas: gas, aho: ing - gas };
 }
 // Expenses by purchase date: debit expenses + card purchases, minus card refunds.
-function purchases() {
+function purchases() { return memo('purchases', purchasesRaw); }
+function purchasesRaw() {
   return D.movs.filter(function (x) { return x.tipo === 'Gasto' || x.tipo === 'Compra TC' || x.tipo === 'Reembolso TC'; }).map(function (x) {
     return { day: x.day, cat: x.cat, medio: x.cuenta, monto: x.tipo === 'Reembolso TC' ? -x.monto : x.monto, desc: x.desc,
       origen: x.tipo === 'Gasto' ? 'Gasto débito' : x.tipo, row: x.row };
@@ -375,12 +396,16 @@ function purchases() {
 }
 function expenseItems() { return BASIS === 'pago' ? D.paid : purchases(); }
 function groupsFrom(items, ym, by) {
+  return memo('gf' + (items === D.paid ? 'p' : items === MEMO.purchases ? 'c' : Math.random()) + ym + by, function () { return groupsFromRaw(items, ym, by); });
+}
+function groupsFromRaw(items, ym, by) {
   var map = {};
   items.forEach(function (p) { if (inMonth(ym)(p)) { var k = p[by] || 'Sin categoría'; map[k] = (map[k] || 0) + p.monto; } });
   return Object.keys(map).map(function (k) { return { name: k, value: map[k] }; })
     .filter(function (c) { return c.value > 0; }).sort(function (a, b) { return b.value - a.value; });
 }
-function paidGroups(ym, by) {
+function paidGroups(ym, by) { return memo('pg' + ym + by, function () { return paidGroupsRaw(ym, by); }); }
+function paidGroupsRaw(ym, by) {
   var map = {};
   D.paid.forEach(function (p) { if (inMonth(ym)(p)) { var k = p[by] || 'Sin categoría'; map[k] = (map[k] || 0) + p.monto; } });
   return Object.keys(map).map(function (k) { return { name: k, value: map[k] }; })
@@ -413,10 +438,12 @@ function txItem(x, showDate) {
   var where = x.tipo === 'Pago TC' ? 'Desde ' + x.cuenta + ' → ' + x.destino
     : x.tipo === 'Transferencia' ? x.cuenta + ' → ' + x.destino
     : (x.cat ? x.cat + ' · ' : '') + x.cuenta;
-  return '<button class="item tap" data-act="editMov" data-arg="' + x.row + '"><span class="nm">' + movIcon(x) +
+  return '<div class="swrow"><div class="swact"><button style="background:var(--line2)" data-act="editMov" data-arg="' + x.row + '">Editar</button>' +
+    '<button style="background:#7F1D1D;color:#FECACA" data-act="swDel" data-arg="' + x.row + '">Borrar</button></div>' +
+    '<button class="item tap" data-act="editMov" data-arg="' + x.row + '"><span class="nm">' + movIcon(x) +
     '<span style="min-width:0"><div class="tt">' + esc(x.desc || x.cat || x.tipo) + '</div><div class="sub">' + esc(where) + (showDate ? ' · ' + ddmm(x.day) : '') + '</div>' +
     (x.pending ? '<div class="pend">' + icon('refresh', 12) + (x.error ? ' No se pudo enviar: ' + esc(x.error) : ' Pendiente de sincronizar') + '</div>' : '') + '</span></span>' +
-    '<span class="am">' + amountHtml(x) + '</span></button>';
+    '<span class="am">' + amountHtml(x) + '</span></button></div>';
 }
 function paidItem(p) {
   var st = catStyle(p.cat);
@@ -447,6 +474,7 @@ function render() {
   var html = { inicio: pageInicio, movs: pageMovs, gastos: pageGastos, cuentas: pageCuentas, cats: pageCats, anio: pageAnio, ajustes: pageAjustes }[PAGE]();
   document.getElementById('app').innerHTML = html;
   if (PAGE === 'movs') renderMovList();
+  animateIn();
 }
 
 // ---------- Inicio ----------
@@ -486,7 +514,7 @@ function pageInicio() {
 
   var head = '<div class="sec">' + alertHtml +
     '<div class="muted small">Gastado ' + (current ? 'este mes' : 'en ' + monthName().toLowerCase()) + '</div>' +
-    '<button class="big tap" data-act="gastos">' + money(cur.gas) + '</button>' + curve +
+    '<button class="big tap" data-act="gastos" data-count="' + cur.gas + '">' + money(cur.gas) + '</button>' + curve +
     (projection ? '<div class="small muted">A este ritmo cierras el mes en <span style="color:var(--text)">' + money(projection) + '</span></div>' : '') +
     '<div class="small muted" style="margin-top:2px">Ingresos ' + (cur.ing ? '<span class="pos">+' + money(cur.ing) + '</span>' : '-') +
     (save !== null ? ' · ' + (projection ? 'ahorro proyectado ' : 'ahorras ') + save + '%' : '') + '</div></div>';
@@ -589,7 +617,7 @@ function pageGastos() {
     '<div class="seg" style="max-width:420px"><button data-act="group" data-arg="cat" class="' + (GROUP === 'cat' ? 'on' : '') + '">Categoría</button>' +
     '<button data-act="group" data-arg="medio" class="' + (GROUP === 'medio' ? 'on' : '') + '">Medio de pago</button></div>' +
     (groups.length ? '<div class="cols"><div><div class="donut"><svg width="104" height="104" viewBox="0 0 42 42">' + rings + '</svg>' +
-      '<div><div class="small muted">Total de ' + monthName().toLowerCase() + '</div><div class="mid">' + money(total) + '</div>' +
+      '<div><div class="small muted">Total de ' + monthName().toLowerCase() + '</div><div class="mid" data-count="' + total + '">' + money(total) + '</div>' +
       '<div class="small">' + deltaHtml(total, prevTotal) + ' <span class="muted">vs ' + monthName(prev.m).toLowerCase() + '</span></div></div></div>' +
       '<div class="info" style="margin-bottom:10px">' + basisInfo + '</div></div>' +
       '<div>' + rows + '</div></div>' : '<div class="empty">Sin gastos en ' + monthName().toLowerCase() + '.</div>');
@@ -600,11 +628,11 @@ function pageCuentas() {
   var deb = accts('Débito'), cred = accts('Crédito');
   var disp = deb.reduce(function (t, a) { return t + debitBalance(a, D.today); }, 0);
   var deuda = cred.reduce(function (t, a) { return t + cardDebt(a); }, 0);
-  var left = '<div class="sec"><div class="cap">Disponible hoy<button data-act="manage">Administrar</button></div><div class="mid" style="margin-bottom:6px">' + money(disp) + '</div>' +
+  var left = '<div class="sec"><div class="cap">Disponible hoy<button data-act="manage">Administrar</button></div><div class="mid" style="margin-bottom:6px" data-count="' + disp + '">' + money(disp) + '</div>' +
     deb.map(function (a) {
       return '<button class="item tap" data-act="cuenta" data-arg="' + esc(a.name) + '"><span class="nm">' + accBox(a.name) + '<span class="tt">' + esc(a.name) + '</span></span><span class="am">' + fmt(debitBalance(a, D.today)) + '</span></button>';
     }).join('') + '</div>';
-  var right = '<div class="sec"><div class="cap">Deuda tarjetas hoy</div><div class="mid" style="margin-bottom:6px">' + money(deuda) + '</div>' +
+  var right = '<div class="sec"><div class="cap">Deuda tarjetas hoy</div><div class="mid" style="margin-bottom:6px" data-count="' + deuda + '">' + money(deuda) + '</div>' +
     cred.map(function (a) {
       var d = cardDebt(a), u = usage(d, a.cupo), pend = (D.pending && D.pending[a.name]) || [];
       var pendTotal = pend.reduce(function (t, p) { return t + p.monto; }, 0), open = OPEN_CARD[a.name];
@@ -773,6 +801,90 @@ function callServer(fn, args, opts) {
     if (el) el.textContent = msg; else toast(e.offline ? 'Sin conexión: necesitas internet para esto.' : 'No se pudo guardar: ' + e.message);
   });
 }
+// Instant change: applied on the phone right away and confirmed with the sheet in the background.
+// If the sheet rejects it (or the connection drops), the change is undone and you're told why.
+var INFLIGHT = 0;
+var OFFLINE_MSG = 'Necesitas internet para esto. Los movimientos nuevos sí se pueden registrar sin conexión.';
+function instant(fn, args, apply, opts) {
+  opts = opts || {};
+  var fail = function (msg) { var el = opts.err && document.getElementById(opts.err); if (el) el.textContent = msg; else toast(msg); };
+  if (navigator.onLine === false || !SERVER) { fail(OFFLINE_MSG); return; }
+  var snapshot = JSON.stringify(SERVER);
+  try { apply(SERVER); } catch (e) { SERVER = JSON.parse(snapshot); fail(e.message); return; }
+  saveLocal(); derive(); render();
+  if (opts.after) opts.after(); else closeSheet();
+  if (opts.ok) toast(opts.ok, opts.undoLabel, opts.undo);
+  INFLIGHT++; setStatus('Guardando en tu hoja…');
+  rpc(fn, args).then(function (data) {
+    INFLIGHT--;
+    if (!INFLIGHT) { setData(data); LAST_LOAD = Date.now(); render(); }
+    setStatus(statusText());
+  }).catch(function (e) {
+    INFLIGHT--;
+    SERVER = JSON.parse(snapshot); saveLocal(); derive(); render();
+    setStatus(statusText());
+    toast(e.offline ? 'Se perdió la conexión y el cambio se deshizo.' : 'No se pudo guardar: ' + e.message + ' El cambio se deshizo.');
+  });
+}
+function saveLocal() { try { localStorage.setItem(CACHE_KEY, JSON.stringify({ saved: Date.now(), data: SERVER })); } catch (e) { /* storage full */ } }
+// Menus (lists) follow the visible categories and active accounts
+function rebuildLists(srv) {
+  var vis = srv.categories.filter(function (c) { return !c.hidden; }), act = srv.accounts.filter(function (a) { return !a.archived; });
+  srv.lists.categoriasGasto = vis.filter(function (c) { return c.kind === 'Gasto'; }).map(function (c) { return c.name; });
+  srv.lists.categoriasIngreso = vis.filter(function (c) { return c.kind === 'Ingreso'; }).map(function (c) { return c.name; });
+  srv.lists.cuentasDebito = act.filter(function (a) { return a.type === 'Débito'; }).map(function (a) { return a.name; });
+  srv.lists.tarjetas = act.filter(function (a) { return a.type === 'Crédito'; }).map(function (a) { return a.name; });
+}
+function nameTaken(listArr, name, except) {
+  return listArr.some(function (x) { return x !== except && x.name.toLowerCase() === name.toLowerCase(); });
+}
+var APPLY = {
+  movUpdate: function (row, d) { return function (srv) {
+    var m = srv.movs.filter(function (x) { return x.row === row; })[0];
+    if (!m) throw new Error('No encontré el movimiento. Actualiza e intenta de nuevo.');
+    m.day = d.fecha; m.tipo = d.tipo; m.cuenta = d.cuenta; m.destino = d.cuentaDestino || ''; m.cat = d.categoria || ''; m.desc = d.descripcion || ''; m.monto = Number(d.monto);
+  }; },
+  movDelete: function (row) { return function (srv) { srv.movs = srv.movs.filter(function (x) { return x.row !== row; }); }; },
+  movRestore: function (m) { return function (srv) { srv.movs.push(JSON.parse(JSON.stringify(m))); }; },
+  catUpdate: function (old, ch) { return function (srv) {
+    var c = srv.categories.filter(function (x) { return x.name === old; })[0];
+    if (!c) throw new Error('No encontré la categoría.');
+    var nn = ch.name != null ? String(ch.name).trim() : c.name;
+    if (nn !== old && nameTaken(srv.categories, nn, c)) throw new Error('Ya existe una categoría llamada "' + nn + '".');
+    if (ch.icon) c.icon = ch.icon;
+    if (ch.color) c.color = ch.color;
+    if (ch.budget !== undefined && c.kind === 'Gasto') c.budget = Number(ch.budget) || 0;
+    if (ch.hidden != null) c.hidden = !!ch.hidden;
+    if (nn !== old) { c.name = nn; srv.movs.forEach(function (m) { if (m.cat === old) m.cat = nn; }); }
+    rebuildLists(srv);
+  }; },
+  catAdd: function (kind, name, ic, color, budget) { return function (srv) {
+    if (nameTaken(srv.categories, name)) throw new Error('Ya existe una categoría llamada "' + name + '".');
+    var count = srv.categories.filter(function (c) { return c.kind === kind; }).length;
+    if (count >= (kind === 'Gasto' ? 20 : 10)) throw new Error(kind === 'Gasto' ? 'Ya tienes 20 categorías de gasto.' : 'Ya tienes 10 categorías de ingreso.');
+    srv.categories.push({ kind: kind, name: name, budget: kind === 'Gasto' ? budget : 0, icon: ic, color: color, hidden: false, row: 0 });
+    rebuildLists(srv);
+  }; },
+  catDelete: function (name) { return function (srv) { srv.categories = srv.categories.filter(function (c) { return c.name !== name; }); rebuildLists(srv); }; },
+  catRestore: function (c) { return function (srv) { srv.categories.push(JSON.parse(JSON.stringify(c))); rebuildLists(srv); }; },
+  accArchive: function (name, on) { return function (srv) { srv.accounts.forEach(function (a) { if (a.name === name) a.archived = on; }); rebuildLists(srv); }; },
+  accUpdate: function (old, nn, ini, cupo) { return function (srv) {
+    var a = srv.accounts.filter(function (x) { return x.name === old; })[0];
+    if (!a) throw new Error('No encontré la cuenta.');
+    if (nn !== old && nameTaken(srv.accounts, nn, a)) throw new Error('Ya existe una cuenta llamada "' + nn + '".');
+    a.ini = ini; if (cupo != null && a.type === 'Crédito') a.cupo = cupo;
+    if (nn !== old) { a.name = nn; srv.movs.forEach(function (m) { if (m.cuenta === old) m.cuenta = nn; if (m.destino === old) m.destino = nn; }); }
+    rebuildLists(srv);
+  }; },
+  accAdd: function (name, type, ini, cupo) { return function (srv) {
+    if (nameTaken(srv.accounts, name)) throw new Error('Ya existe una cuenta llamada "' + name + '".');
+    if (srv.accounts.filter(function (a) { return a.type === type && !a.archived; }).length >= 10) throw new Error('Ya tienes 10 cuentas activas de este tipo.');
+    srv.accounts.push({ name: name, type: type, ini: ini, archived: false, cupo: type === 'Crédito' ? cupo : 0 });
+    rebuildLists(srv);
+  }; },
+  accDelete: function (name) { return function (srv) { srv.accounts = srv.accounts.filter(function (a) { return a.name !== name; }); rebuildLists(srv); }; }
+};
+
 function opts(list, selected) {
   if (selected && list.indexOf(selected) < 0) list = list.concat([selected]);
   return list.map(function (v) { return '<option' + (v === selected ? ' selected' : '') + '>' + esc(v) + '</option>'; }).join('');
@@ -859,7 +971,7 @@ function saveMov() {
   if (!v.monto) { document.getElementById('mvErr').textContent = 'Escribe un monto mayor que cero.'; return; }
   if (!v.fecha) { document.getElementById('mvErr').textContent = 'Elige una fecha.'; return; }
   var data = { fecha: v.fecha, tipo: v.tipo, cuenta: v.cuenta, cuentaDestino: v.destino, categoria: v.cat, descripcion: v.desc, monto: v.monto };
-  if (MOV.row && MOV.row > 0) { callServer('updateMovement', [MOV.row, MOV.original, data], { ok: 'Movimiento actualizado', err: 'mvErr', btn: 'mvSave' }); return; }
+  if (MOV.row && MOV.row > 0) { instant('updateMovement', [MOV.row, MOV.original, data], APPLY.movUpdate(MOV.row, data), { ok: 'Movimiento actualizado', err: 'mvErr' }); return; }
   // New (or still pending) movement: saved on the phone first, then sent when there's internet
   if (MOV.row && MOV.row < 0) {
     var q = queueGet(), it = q.filter(function (i) { return i.id === MOV.mov.qid; })[0];
@@ -880,12 +992,13 @@ function deleteMov() {
     toast('Movimiento pendiente eliminado');
     return;
   }
-  callServer('deleteMovement', [MOV.row, MOV.original], {
-    err: 'mvErr', busy: 'Eliminando el movimiento…',
-    done: function () {
-      closeSheet();
-      toast('Movimiento eliminado', 'Deshacer', function () { callServer('restoreMovement', [m], { ok: 'Movimiento restaurado', busy: 'Restaurando el movimiento…', done: function () {} }); });
-    }
+  removeMovement(m, { day: m.day, tipo: m.tipo, monto: m.monto }, 'mvErr');
+}
+// Used by the edit form and by swiping a row
+function removeMovement(m, original, errId) {
+  instant('deleteMovement', [m.row, original], APPLY.movDelete(m.row), {
+    err: errId, ok: 'Movimiento eliminado', undoLabel: 'Deshacer',
+    undo: function () { instant('restoreMovement', [m], APPLY.movRestore(m), { ok: 'Movimiento restaurado', after: function () {} }); }
   });
 }
 
@@ -930,24 +1043,21 @@ function saveCat() {
   var bEl = document.getElementById('cfBudget'), budget = bEl ? Number(String(bEl.value).replace(/[^0-9]/g, '')) || 0 : 0;
   if (!name) { document.getElementById('cfErr').textContent = 'Escribe el nombre de la categoría.'; return; }
   if (f.editing) {
-    callServer('updateCategory', [f.editing, { name: name, icon: f.icon, color: f.color, budget: f.kind === 'Gasto' ? budget : undefined }],
-      { ok: 'Categoría actualizada', err: 'cfErr', btn: 'cfSave', busy: 'Guardando la categoría…' });
+    var ch = { name: name, icon: f.icon, color: f.color, budget: f.kind === 'Gasto' ? budget : undefined };
+    instant('updateCategory', [f.editing, ch], APPLY.catUpdate(f.editing, ch), { ok: 'Categoría actualizada', err: 'cfErr' });
   } else {
-    callServer('addCategory', [f.kind, name, f.icon, f.color, budget], {
-      err: 'cfErr', btn: 'cfSave', busy: 'Creando la categoría…',
-      done: function () { closeSheet(); CAT_TAB = f.kind; render(); toast('Categoría creada. Ya aparece en tus atajos y en el +.'); }
+    instant('addCategory', [f.kind, name, f.icon, f.color, budget], APPLY.catAdd(f.kind, name, f.icon, f.color, budget), {
+      err: 'cfErr', ok: 'Categoría creada. Ya aparece en tus atajos y en el +.',
+      after: function () { closeSheet(); CAT_TAB = f.kind; render(); }
     });
   }
 }
 function deleteCat() {
-  var name = CATF.editing;
-  callServer('deleteCategory', [name], {
-    err: 'cfErr', busy: 'Eliminando la categoría…',
-    done: function (data) {
-      closeSheet();
-      var info = data.restoreCategory;
-      toast('Categoría eliminada', 'Deshacer', function () { callServer('restoreCategory', [info], { ok: 'Categoría restaurada', busy: 'Restaurando la categoría…', done: function () {} }); });
-    }
+  var name = CATF.editing, c = JSON.parse(JSON.stringify(findCat(name)));
+  var info = { kind: c.kind, row: c.row, name: c.name, budget: c.budget, style: [c.icon || '', c.color || '', c.hidden ? 'oculta' : ''].join('|').replace(/\|+$/, '') };
+  instant('deleteCategory', [name], APPLY.catDelete(name), {
+    err: 'cfErr', ok: 'Categoría eliminada', undoLabel: 'Deshacer',
+    undo: function () { instant('restoreCategory', [info], APPLY.catRestore(c), { ok: 'Categoría restaurada', after: function () {} }); }
   });
 }
 
@@ -1006,7 +1116,7 @@ function saveEditAccount() {
   var newIni = ACC_MODE === 'ini' ? val : val - (balanceNow(a) - a.ini);
   var cupoEl = document.getElementById('eaCupo');
   var cupo = a.type === 'Crédito' && cupoEl ? (Number(String(cupoEl.value).replace(/[^0-9]/g, '')) || 0) : null;
-  callServer('updateAccount', [a.name, name, newIni, cupo], { ok: 'Cuenta actualizada', err: 'accErr', btn: 'accSaveEdit' });
+  instant('updateAccount', [a.name, name, newIni, cupo], APPLY.accUpdate(a.name, name, newIni, cupo), { ok: 'Cuenta actualizada', err: 'accErr' });
 }
 function showAddAccount(keepValues) {
   var g = function (id) { var el = document.getElementById(id); return keepValues && el ? el.value : ''; };
@@ -1024,7 +1134,8 @@ function saveNewAccount() {
   var num = function (id) { var el = document.getElementById(id); return el ? Number(String(el.value).replace(/[^0-9]/g, '')) || 0 : 0; };
   var name = document.getElementById('accName').value.trim();
   if (!name) { document.getElementById('accErr').textContent = 'Escribe el nombre de la cuenta.'; return; }
-  callServer('addAccount', [name, NEW_TYPE, num('accIni'), NEW_TYPE === 'Crédito' ? num('accCupo') : 0], { ok: 'Cuenta agregada', err: 'accErr', btn: 'accSave' });
+  var ini = num('accIni'), cupo = NEW_TYPE === 'Crédito' ? num('accCupo') : 0;
+  instant('addAccount', [name, NEW_TYPE, ini, cupo], APPLY.accAdd(name, NEW_TYPE, ini, cupo), { ok: 'Cuenta agregada', err: 'accErr' });
 }
 
 // ===================== Month picker and page menu =====================
@@ -1052,14 +1163,20 @@ function toggleMenu(on) {
 var ACTIONS = {
   menu: function () { toggleMenu(!document.getElementById('menu').classList.contains('on')); },
   menuClose: function () { toggleMenu(false); },
-  go: function (p) { toggleMenu(false); closeSheet(); PAGE = p; render(); document.getElementById('scroller').scrollTop = 0; },
-  prev: function () { if (PAGE === 'anio') S.y--; else S = shift(S.y, S.m, -1); render(); },
-  next: function () { if (PAGE === 'anio') S.y++; else S = shift(S.y, S.m, 1); render(); },
+  go: function (p) { toggleMenu(false); closeSheet(); slide(0, function () { PAGE = p; document.getElementById('scroller').scrollTop = 0; }); },
+  prev: function () { slide(-1, function () { shiftPeriod(-1); }); },
+  next: function () { slide(1, function () { shiftPeriod(1); }); },
   picker: function () { PICK_Y = S.y; showPicker(); },
   pyprev: function () { PICK_Y--; showPicker(); },
   pynext: function () { PICK_Y++; showPicker(); },
-  pick: function (m) { S = { y: PICK_Y, m: Number(m) }; closeSheet(); render(); },
-  openMonth: function (m) { S.m = Number(m); PAGE = 'inicio'; render(); document.getElementById('scroller').scrollTop = 0; },
+  pick: function (m) { closeSheet(); slide(0, function () { S = { y: PICK_Y, m: Number(m) }; }); },
+  openMonth: function (m) { slide(0, function () { S.m = Number(m); PAGE = 'inicio'; document.getElementById('scroller').scrollTop = 0; }); },
+  swDel: function (row) {
+    var m = D.movs.filter(function (x) { return x.row === Number(row); })[0];
+    if (!m) return;
+    if (m.pending) { queueSet(queueGet().filter(function (i) { return i.id !== m.qid; })); derive(); render(); toast('Movimiento pendiente eliminado'); return; }
+    removeMovement(m, { day: m.day, tipo: m.tipo, monto: m.monto }, null);
+  },
   refresh: function () { loadData(false); },
   close: closeSheet,
   toastAction: function () { var fn = TOAST_FN; TOAST_FN = null; if (fn) fn(); },
@@ -1074,8 +1191,8 @@ var ACTIONS = {
 
   // expenses
   gastos: function () { showPaid({}); },
-  group: function (g) { GROUP = g; render(); },
-  basis: function (b) { BASIS = b; render(); },
+  group: function (g) { GROUP = g; ANIMATE = true; render(); },
+  basis: function (b) { BASIS = b; ANIMATE = true; render(); },
   cat: function (c) { showPaid({ cat: c }); },
   medio: function (m) { showPaid({ medio: m }); },
   fcat: function (c) { showPaid({ cat: c || null, medio: F_MEDIO }); },
@@ -1091,12 +1208,12 @@ var ACTIONS = {
   editAcc: function (n) { ACC_MODE = 'ini'; showEditAccount(n); },
   accMode: function (m) { ACC_MODE = m; showEditAccount(EDIT_ACC, true); },
   saveAcc: saveEditAccount,
-  archive: function () { callServer('setAccountArchived', [EDIT_ACC, true], { ok: 'Cuenta archivada', err: 'accErr', btn: 'accArchive', busy: 'Archivando la cuenta…' }); },
-  unarchive: function (n) { callServer('setAccountArchived', [n, false], { ok: 'Cuenta reactivada', err: 'manErr', done: showManage, busy: 'Reactivando la cuenta…' }); },
+  archive: function () { instant('setAccountArchived', [EDIT_ACC, true], APPLY.accArchive(EDIT_ACC, true), { ok: 'Cuenta archivada', err: 'accErr' }); },
+  unarchive: function (n) { instant('setAccountArchived', [n, false], APPLY.accArchive(n, false), { ok: 'Cuenta reactivada', err: 'manErr', after: showManage }); },
   delAcc: function (n) {
     if (CONFIRM_DEL_ACC !== n) { CONFIRM_DEL_ACC = n; showManage(); return; }
     CONFIRM_DEL_ACC = null;
-    callServer('deleteAccount', [n], { ok: 'Cuenta eliminada', err: 'manErr', done: showManage, busy: 'Eliminando la cuenta…' });
+    instant('deleteAccount', [n], APPLY.accDelete(n), { ok: 'Cuenta eliminada', err: 'manErr', after: showManage });
   },
   addAccount: function () { NEW_TYPE = 'Débito'; showAddAccount(false); },
   newType: function (t) { NEW_TYPE = t; showAddAccount(true); },
@@ -1117,7 +1234,7 @@ var ACTIONS = {
   saveCat: saveCat,
   cfHide: function () {
     var hide = !CATF.hidden;
-    callServer('updateCategory', [CATF.editing, { hidden: hide }], { ok: hide ? 'Categoría oculta' : 'Categoría visible de nuevo', err: 'cfErr', busy: hide ? 'Ocultando la categoría…' : 'Mostrando la categoría…' });
+    instant('updateCategory', [CATF.editing, { hidden: hide }], APPLY.catUpdate(CATF.editing, { hidden: hide }), { ok: hide ? 'Categoría oculta' : 'Categoría visible de nuevo', err: 'cfErr' });
   },
   cfDelete: deleteCat
 };
@@ -1132,12 +1249,151 @@ document.addEventListener('input', function (e) {
   if (e.target && e.target.id === 'search') { SEARCH = e.target.value.trim(); renderMovList(); }
 });
 
-// Swipe down to close the sheet
+// ===================== Animations =====================
+var ANIMATE = true;   // play entry animations on the next render (page, month or first load)
+var REDUCE = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+// Numbers count up, bars grow, rings and the donut draw themselves.
+function animateIn() {
+  if (!ANIMATE || !D) return;
+  ANIMATE = false;
+  if (REDUCE) return;
+  var app = document.getElementById('app');
+  Array.prototype.forEach.call(app.querySelectorAll('[data-count]'), function (el) {
+    var to = Number(el.getAttribute('data-count')) || 0, t0 = null;
+    var step = function (t) {
+      if (!t0) t0 = t;
+      var p = Math.min(1, (t - t0) / 650), e = 1 - Math.pow(1 - p, 3);
+      el.textContent = money(to * e);
+      if (p < 1) requestAnimationFrame(step);
+    };
+    el.textContent = money(0);
+    requestAnimationFrame(step);
+  });
+  var bars = app.querySelectorAll('.bar > div, .stack > div');
+  Array.prototype.forEach.call(bars, function (b) { b.dataset.w = b.style.width; b.style.transition = 'none'; b.style.width = '0'; });
+  var circles = app.querySelectorAll('svg circle[stroke-dasharray]');
+  Array.prototype.forEach.call(circles, function (c) {
+    var d = c.getAttribute('stroke-dasharray'), total = d.split(/[ ,]+/).map(Number).reduce(function (s, v) { return s + v; }, 0);
+    c.dataset.d = d; c.style.transition = 'none'; c.style.strokeDasharray = '0 ' + total;
+  });
+  void app.offsetWidth;
+  requestAnimationFrame(function () {
+    Array.prototype.forEach.call(bars, function (b) { b.style.transition = ''; b.style.width = b.dataset.w; });
+    Array.prototype.forEach.call(circles, function (c) { c.style.transition = 'stroke-dasharray .8s cubic-bezier(.2,.8,.2,1)'; c.style.strokeDasharray = c.dataset.d; });
+  });
+}
+function shiftPeriod(dir) { if (PAGE === 'anio') S.y += dir; else S = shift(S.y, S.m, dir); }
+// Page or month change: the content slides (dir = 1 / -1) or fades (dir = 0)
+function slide(dir, change) {
+  var app = document.getElementById('app');
+  if (REDUCE || !D) { change(); ANIMATE = true; render(); return; }
+  app.style.transition = 'transform .14s ease, opacity .14s ease';
+  app.style.opacity = '0';
+  app.style.transform = dir ? 'translateX(' + (-dir * 40) + 'px)' : 'translateY(6px)';
+  setTimeout(function () {
+    change(); ANIMATE = true; render();
+    app.style.transition = 'none';
+    app.style.transform = dir ? 'translateX(' + (dir * 40) + 'px)' : 'translateY(6px)';
+    void app.offsetWidth;
+    app.style.transition = ''; app.style.opacity = '1'; app.style.transform = '';
+  }, 140);
+}
+
+// ===================== Gestures (iPhone) =====================
+// Pull down to refresh · swipe the page sideways to change month · swipe a movement to edit or delete.
+var OPEN_ROW = null, SUPPRESS_CLICK = false;
+function closeRow() { if (OPEN_ROW) { OPEN_ROW.style.transform = ''; OPEN_ROW = null; } }
+document.addEventListener('click', function (e) {
+  if (SUPPRESS_CLICK) { SUPPRESS_CLICK = false; e.stopPropagation(); e.preventDefault(); return; }
+  if (OPEN_ROW && !e.target.closest('.swact')) { closeRow(); e.stopPropagation(); e.preventDefault(); }
+}, true);
 (function () {
-  var sheet = document.getElementById('sheet'), y0 = null;
-  sheet.addEventListener('touchstart', function (e) { if (document.getElementById('shBody').scrollTop <= 0) y0 = e.touches[0].clientY; }, { passive: true });
-  sheet.addEventListener('touchmove', function (e) { if (y0 !== null && e.touches[0].clientY - y0 > 90) { y0 = null; closeSheet(); } }, { passive: true });
-  sheet.addEventListener('touchend', function () { y0 = null; }, { passive: true });
+  var sc = document.getElementById('scroller'), ptr = document.getElementById('ptr');
+  var x0 = 0, y0 = 0, mode = null, fg = null, base = 0, top0 = 0;
+  var suppress = function () { SUPPRESS_CLICK = true; setTimeout(function () { SUPPRESS_CLICK = false; }, 350); };
+  sc.addEventListener('touchstart', function (e) {
+    var t = e.touches[0]; x0 = t.clientX; y0 = t.clientY; mode = null; top0 = sc.scrollTop;
+    var row = e.target.closest('.swrow'); fg = row ? row.querySelector(':scope > .item') : null;
+    base = fg && fg === OPEN_ROW ? -150 : 0;
+  }, { passive: true });
+  sc.addEventListener('touchmove', function (e) {
+    if (!D) return;
+    var t = e.touches[0], dx = t.clientX - x0, dy = t.clientY - y0;
+    if (!mode) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      var blocked = e.target.closest('.chips, .seg, input, select, .search, .typegrid');
+      if (Math.abs(dx) > Math.abs(dy) * 1.3 && !blocked) mode = fg ? 'row' : (PAGE !== 'ajustes' ? 'month' : 'none');
+      else if (dy > 0 && top0 <= 0 && sc.scrollTop <= 0) mode = 'pull';
+      else mode = 'none';
+      if (OPEN_ROW && OPEN_ROW !== fg) closeRow();
+    }
+    if (mode === 'row') {
+      e.preventDefault(); fg.style.transition = 'none';
+      fg.style.transform = 'translateX(' + Math.max(-190, Math.min(0, base + dx)) + 'px)';
+    } else if (mode === 'month') {
+      e.preventDefault();
+      var app = document.getElementById('app');
+      app.style.transition = 'none'; app.style.transform = 'translateX(' + dx * 0.35 + 'px)';
+      app.style.opacity = String(1 - Math.min(0.5, Math.abs(dx) / 400));
+    } else if (mode === 'pull') {
+      e.preventDefault();
+      var hgt = Math.min(80, dy * 0.45);
+      ptr.style.transition = 'none'; ptr.style.height = hgt + 'px';
+      document.getElementById('ptrTx').textContent = hgt >= 56 ? 'Suelta para actualizar' : 'Jala para actualizar';
+    }
+  }, { passive: false });
+  sc.addEventListener('touchend', function (e) {
+    var t = e.changedTouches[0], dx = t.clientX - x0, dy = t.clientY - y0;
+    if (mode === 'row') {
+      suppress(); fg.style.transition = '';
+      var open = base + dx < -70;
+      fg.style.transform = open ? 'translateX(-150px)' : '';
+      OPEN_ROW = open ? fg : null;
+    } else if (mode === 'month') {
+      suppress();
+      var app = document.getElementById('app');
+      if (Math.abs(dx) > 70) slide(dx < 0 ? 1 : -1, function () { shiftPeriod(dx < 0 ? 1 : -1); });
+      else { app.style.transition = ''; app.style.transform = ''; app.style.opacity = '1'; }
+    } else if (mode === 'pull') {
+      ptr.style.transition = 'height .25s ease';
+      if (dy * 0.45 >= 56 && navigator.onLine !== false) {
+        ptr.style.height = '48px'; ptr.classList.add('spin');
+        document.getElementById('ptrTx').textContent = 'Actualizando…';
+        var t0 = Date.now(), end = function () {
+          setTimeout(function () { ptr.classList.remove('spin'); ptr.style.height = '0'; }, Math.max(0, 600 - (Date.now() - t0)));
+        };
+        (loadData(false) || Promise.resolve()).then(end, end);
+      } else {
+        if (navigator.onLine === false) toast('Sin conexión');
+        ptr.style.height = '0';
+      }
+    }
+    mode = null;
+  }, { passive: true });
+})();
+
+// The sheet follows your finger when you drag it down, and closes past a point.
+(function () {
+  var sheet = document.getElementById('sheet'), y0 = null, dy = 0, active = false;
+  sheet.addEventListener('touchstart', function (e) {
+    var fromHead = !!e.target.closest('.sh-head');
+    if (fromHead || document.getElementById('shBody').scrollTop <= 0) { y0 = e.touches[0].clientY; dy = 0; active = false; } else y0 = null;
+  }, { passive: true });
+  sheet.addEventListener('touchmove', function (e) {
+    if (y0 === null) return;
+    dy = e.touches[0].clientY - y0;
+    if (!active) { if (dy > 8) active = true; else if (dy < -4) { y0 = null; return; } else return; }
+    e.preventDefault();
+    sheet.style.transition = 'none';
+    sheet.style.transform = 'translateY(' + Math.max(0, dy) + 'px)';
+  }, { passive: false });
+  sheet.addEventListener('touchend', function () {
+    if (y0 === null || !active) { y0 = null; return; }
+    sheet.style.transition = ''; sheet.style.transform = '';
+    if (dy > 110) closeSheet();
+    y0 = null; active = false;
+  }, { passive: true });
 })();
 
 // ===================== Connection settings =====================
@@ -1218,6 +1474,7 @@ function derive() {
     return { row: -(k + 1), qid: i.id, pending: true, error: i.error || '', day: d.fecha, tipo: d.tipo, cuenta: d.cuenta,
       destino: d.cuentaDestino || '', cat: d.categoria || '', desc: d.descripcion || '', monto: Number(d.monto) || 0 };
   });
+  MEMO = {};
   D = Object.assign({}, SERVER, { movs: SERVER.movs.concat(pend) });
   var led = computeLedger(D.accounts, D.movs);
   D.paid = led.paid; D.pending = led.pending;
@@ -1276,12 +1533,19 @@ function loadData(silent) {
   btn.classList.add('spin');
   if (D) setStatus('Actualizando…');
   var done = function () { LOADING = false; btn.classList.remove('spin'); };
-  var p = queueGet().length ? flushQueue(false) : rpc('getDashboardData', []).then(function (data) { setData(data); LAST_LOAD = Date.now(); });
-  p.then(function () {
+  var changed = true;
+  var p = queueGet().length ? flushQueue(false) : rpc('getDashboardData', [SERVER && SERVER.version]).then(function (data) {
+    if (data.unchanged && SERVER) {          // nothing new: only a tiny answer was downloaded
+      changed = SERVER.today !== data.today;
+      SERVER.today = data.today; saveLocal(); derive();
+    } else setData(data);
+    LAST_LOAD = Date.now();
+  });
+  return p.then(function () {
     done();
     if (!S.y && D) S = { y: Number(D.today.slice(0, 4)), m: Number(D.today.slice(5, 7)) };
     setStatus(statusText());
-    render();
+    if (changed && !INFLIGHT) render();
     if (!silent && document.getElementById('toastMsg').textContent === 'Sincronizando…') hideToast();
   }).catch(function (e) {
     done();

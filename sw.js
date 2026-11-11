@@ -1,6 +1,6 @@
-// Lets the app open without internet. Your data is not here: it's saved by the app on the phone.
-// Change VERSION when you upload new files, so phones pick up the update.
-const VERSION = 'mis-finanzas-v13';
+// Lets the app open instantly, even without internet. Your data is not here: the app keeps it on the phone.
+// Change VERSION when you upload new files.
+const VERSION = 'mis-finanzas-v14';
 const FILES = ['./', 'index.html', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -13,18 +13,20 @@ self.addEventListener('activate', e => {
     .then(() => self.clients.claim()));
 });
 
-// The app page: newest version when online, saved copy when offline. Icons: saved copy.
-// Requests to Google (your data) are never cached here.
+// The app opens from the saved copy right away (no waiting for the network) and,
+// in the background, downloads the newest version for the next time you open it.
+// Requests to Google (your data) never go through here.
 self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
-  if (req.mode === 'navigate' || req.url.endsWith('index.html')) {
-    e.respondWith(fetch(req).then(res => {
-      const copy = res.clone();
-      caches.open(VERSION).then(c => c.put('index.html', copy));
+  const isPage = req.mode === 'navigate' || req.url.endsWith('index.html');
+  const key = isPage ? 'index.html' : req;
+  e.respondWith(caches.open(VERSION).then(cache => cache.match(key).then(hit => {
+    const fresh = fetch(req).then(res => {
+      if (res && res.ok) cache.put(key, res.clone());
       return res;
-    }).catch(() => caches.match('index.html')));
-    return;
-  }
-  e.respondWith(caches.match(req).then(hit => hit || fetch(req)));
+    }).catch(() => hit);
+    if (hit) { e.waitUntil(fresh); return hit; }
+    return fresh;
+  })));
 });
